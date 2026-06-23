@@ -170,8 +170,21 @@ def on_frame(data):
 
 if __name__ == "__main__":
     print("Cargando modelos de DeepFace (puede tardar la primera vez)...")
-    # 'precalienta' los modelos para que el primer frame real no tarde 10-20s
+
+    # Precalentar modelos
     dummy = np.zeros((100, 100, 3), dtype=np.uint8)
-    analyze_frame(dummy)
-    print("Listo. Abre http://localhost:5000")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+
+    try:
+        analyze_frame(dummy)
+    except Exception as e:
+        print(f"Error precalentando DeepFace: {e}")
+
+    print("Servidor iniciado")
+
+    socketio.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        debug=False,
+        allow_unsafe_werkzeug=True
+    )
