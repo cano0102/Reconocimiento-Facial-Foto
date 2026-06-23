@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>DeepFace en tiempo real</title>
+<style>
+  body {
+    background: #0f1115;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; }
+  .wrap { position: relative; width: 640px; height: 480px; }
+  video, canvas#overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 640px;
+    height: 480px;
+    border-radius: 8px;
+  }
+  canvas#overlay { pointer-events: none; }
+  .panel {
+    margin-top: 16px;
+    width: 640px;
+    background: #1a1d24;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 0.95rem;
+    line-height: 1.4;
+  }
+  .controls { margin-top: 12px; display: flex; gap: 10px; }
+  button {
+    background: #3b82f6; color: white; border: none;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer;
+  }
+  button:disabled { background: #555; cursor: not-allowed; }
+  .status { font-size: 0.8rem; color: #9aa0a6; margin-top: 4px; }
+  .emo-bar { display:flex; gap:6px; margin-top:6px; flex-wrap: wrap;}
+  .emo-tag {
+    background:#2a2f3a; padding:2px 8px; border-radius:12px; font-size:0.8rem;
+  }
+</style>
+</head>
+<body>
+  <h1>Análisis facial en tiempo real (DeepFace)</h1>
+
+  <div class="wrap">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay" width="640" height="480"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Iniciar cámara</button>
+    <button id="stopBtn" disabled>Detener</button>
+  </div>
+  <div class="status" id="status">Desconectado</div>
+
+  <div class="panel" id="panel">
+    Esperando datos...
+  </div>
+
+  <!-- canvas oculto para capturar frames del video en baja resolución antes de enviarlos -->
+  <canvas id="capture" width="320" height="240" style="display:none;"></canvas>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const overlay = document.getElementById("overlay");
+    const overlayCtx = overlay.getContext("2d");
+    const capture = document.getElementById("capture");
+    const captureCtx = capture.getContext("2d");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const panel = document.getElementById("panel");
+
+    const socket = io(); // conecta al mismo host que sirvió la página
+
+    let stream = null;
+    let sendingLoop = null;
+    let waitingResponse = false; // back-pressure: no mandamos otro frame hasta tener respuesta
+    let lastFaces = [];
+
+    // Escala entre el canvas de captura (320x240, lo que ve DeepFace) y el overlay (640x480)
+    const SCALE_X = overlay.width / capture.width;
+    const SCALE_Y = overlay.height / capture.height;
+
+    statusEl.textContent = "Conectando al servidor...";
+
+    socket.on("connect", () => {
+      statusEl.textContent = "Conectado al servidor. Pulsa 'Iniciar cámara'.";
+    });
+
+    socket.on("disconnect", () => {
+      statusEl.textContent = "Desconectado del servidor.";
+    });
+
+    socket.on("result", (data) => {
+      waitingResponse = false;
+
+      if (data.error) {
+        panel.innerHTML = `<span style="color:#f87171">Error: ${data.error}</span>`;
+        lastFaces = [];
+        drawOverlay();
+        return;
+      }
+
+      const faces = data.faces || [];
+      lastFaces = Array.isArray(faces) ? faces.filter(f => !f.error) : [];
+
+      if (lastFaces.length === 0) {
+        panel.innerHTML = `No se detectó ninguna cara. (latencia: ${data.latency_ms} ms)`;
+      } else {
+        panel.innerHTML = lastFaces.map((f, i) => {
+          const emo = f.dominant_emotion || "?";
+          const age = f.age != null ? Math.round(f.age) : "?";
+          const gender = f.dominant_gender || "?";
+          const race = f.dominant_race || "?";
+          const emoScores = f.emotion
+            ? Object.entries(f.emotion)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([k, v]) => `<span class="emo-tag">${k}: ${v.toFixed(1)}%</span>`)
+                .join("")
+            : "";
+          return `
+            <div>
+              <strong>Cara ${i + 1}</strong> — Emoción: <b>${emo}</b> ·
+              Edad aprox: <b>${age}</b> · Género: <b>${gender}</b> · Raza: <b>${race}</b>
+              <div class="emo-bar">${emoScores}</div>
+            </div>`;
+        }).join("<hr style='border-color:#2a2f3a; margin:8px 0;'>")
+        + `<div class="status">Latencia del análisis: ${data.latency_ms} ms</div>`;
+      }
+
+      drawOverlay();
+    });
+
+    function drawOverlay() {
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+      overlayCtx.lineWidth = 3;
+      overlayCtx.strokeStyle = "#22c55e";
+      overlayCtx.font = "16px system-ui";
+      overlayCtx.fillStyle = "#22c55e";
+
+      lastFaces.forEach((f) => {
+        const region = f.region;
+        if (!region) return;
+        const x = region.x * SCALE_X;
+        const y = region.y * SCALE_Y;
+        const w = region.w * SCALE_X;
+        const h = region.h * SCALE_Y;
+        overlayCtx.strokeRect(x, y, w, h);
+        const label = `${f.dominant_emotion || ""} (${Math.round(f.age || 0)})`;
+        overlayCtx.fillText(label, x, y > 18 ? y - 6 : y + h + 16);
+      });
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480 },
+          audio: false,
+        });
+        video.srcObject = stream;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        statusEl.textContent = "Cámara activa. Analizando...";
+
+        // Enviamos un frame cada ~250ms (4 fps). Ajusta este intervalo según
+        // qué tan potente sea tu máquina/GPU; DeepFace es el cuello de botella, no la red.
+        sendingLoop = setInterval(sendFrame, 250);
+      } catch (err) {
+        statusEl.textContent = "No se pudo acceder a la cámara: " + err.message;
+      }
+    }
+
+    function stopCamera() {
+      if (sendingLoop) clearInterval(sendingLoop);
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusEl.textContent = "Cámara detenida.";
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function sendFrame() {
+      if (waitingResponse) return; // back-pressure: el backend aún no respondió el frame anterior
+      if (!video.videoWidth) return;
+
+      captureCtx.drawImage(video, 0, 0, capture.width, capture.height);
+      const dataUrl = capture.toDataURL("image/jpeg", 0.7); // calidad 0.7: buen balance tamaño/precisión
+
+      waitingResponse = true;
+      socket.emit("frame", { image: dataUrl });
+    }
+
+    startBtn.addEventListener("click", startCamera);
+    stopBtn.addEventListener("click", stopCamera);
+  </script>
+</body>
+</html>
